@@ -7,6 +7,7 @@ import (
 	"github.com/nats-io/nats.go"
 	"log"
 	"math/rand"
+	"net"
 	"net/http"
 	"net/url"
 	"nhooyr.io/websocket"
@@ -60,10 +61,20 @@ func (a *NatsProxy) pickNatsURL() *url.URL {
 		if parse, err := url.Parse(host); err != nil {
 			continue
 		} else {
-			if conn, dialErr := tls.Dial("tcp4", parse.Host, nil); dialErr == nil {
-				_ = conn.Close()
-				return parse
+
+			switch parse.Scheme {
+			case "ws":
+				if conn, dialErr := net.Dial("tcp4", parse.Host); dialErr == nil {
+					_ = conn.Close()
+					return parse
+				}
+			case "wss":
+				if conn, dialErr := tls.Dial("tcp4", parse.Host, nil); dialErr == nil {
+					_ = conn.Close()
+					return parse
+				}
 			}
+
 		}
 	}
 	return nil
