@@ -175,8 +175,6 @@ func setupApiEndpoints(engine *gin.Engine) error {
 
 	var backends = []string{
 		"wss://nats-0.localtest.me:4252",
-		"wss://nats-1.localtest.me:5252",
-		"wss://nats-2.localtest.me:6252",
 	}
 
 	engine.GET("/natsws/:clientId", gin.WrapH(proxy.New(backends...)))

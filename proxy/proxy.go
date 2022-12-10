@@ -26,8 +26,8 @@ func New(backends ...string) *NatsProxy {
 
 	var monitorOpt []nats.Option
 	monitorOpt = append(monitorOpt, nats.RetryOnFailedConnect(true))
-	//monitorOpt = append(monitorOpt, nats.ConnectHandler(a.updateServers))
-	//monitorOpt = append(monitorOpt, nats.DiscoveredServersHandler(a.updateServers))
+	monitorOpt = append(monitorOpt, nats.ConnectHandler(a.updateServers))
+	monitorOpt = append(monitorOpt, nats.DiscoveredServersHandler(a.updateServers))
 
 	monitor, err := nats.Connect(strings.Join(a.backends, ","), monitorOpt...)
 	if err != nil {
@@ -35,20 +35,17 @@ func New(backends ...string) *NatsProxy {
 	}
 	a.monitor = monitor
 
-	fmt.Println("monitor connected", a.monitor.ConnectedUrl(), a.monitor.DiscoveredServers())
-
 	return a
 }
 
 func (a *NatsProxy) updateServers(conn *nats.Conn) {
-	fmt.Println("updateServers", conn.ConnectedUrl(), conn.DiscoveredServers())
 	var newBackends []string
 	connectedUrl := conn.ConnectedUrl()
 	if connectedUrl != "" {
 		newBackends = append(newBackends, connectedUrl)
 	}
 	a.backends = append(newBackends, conn.DiscoveredServers()...)
-	fmt.Println("backends are now", a.backends)
+	//fmt.Println("backends are now", a.backends)
 }
 
 func (a *NatsProxy) pickNatsURL() *url.URL {
@@ -104,6 +101,9 @@ func (a *NatsProxy) ServeHTTP(writer http.ResponseWriter, request *http.Request)
 	errClient := make(chan error, 1)
 	errBackend := make(chan error, 1)
 
+	//fmt.Println("connecting client", request.RemoteAddr, "to", natsUrl.String())
+	//fmt.Println("client headers", request.Header)
+
 	go copyWebSocketFrames(ctx, client, backend, errClient, errBackend)
 	go copyWebSocketFrames(ctx, backend, client, errBackend, errClient)
 
@@ -118,7 +118,9 @@ func (a *NatsProxy) ServeHTTP(writer http.ResponseWriter, request *http.Request)
 	switch websocket.CloseStatus(err) {
 	case websocket.StatusGoingAway, websocket.StatusNormalClosure:
 	default:
-		log.Printf(msg, err)
+		if !strings.Contains(err.Error(), "failed to read frame header: EOF") {
+			log.Printf(msg, err)
+		}
 	}
 
 }
@@ -130,6 +132,9 @@ func copyWebSocketFrames(ctx context.Context, from, to *websocket.Conn, fromChan
 		if err != nil {
 			closeStatus := websocket.StatusNormalClosure
 			closeMessage := err.Error()
+			if len(closeMessage) > 123 {
+				closeMessage = closeMessage[0:123]
+			}
 			if e, ok := err.(*websocket.CloseError); ok {
 				if e.Code != websocket.StatusNoStatusRcvd {
 					closeStatus = e.Code
