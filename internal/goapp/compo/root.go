@@ -20,7 +20,7 @@ func (r *Root) Render() app.UI {
 }
 
 func (r *Root) OnAppUpdate(ctx app.Context) {
-	//if app.Getenv("DEV") != "" && ctx.AppUpdateAvailable() {
-	//	ctx.Reload()
-	//}
+	if app.Getenv("DEV") != "" && ctx.AppUpdateAvailable() {
+		ctx.Reload()
+	}
 }
