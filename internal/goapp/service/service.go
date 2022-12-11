@@ -11,10 +11,10 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/kardianos/service"
 	"github.com/maxence-charriere/go-app/v9/pkg/app"
+	"github.com/mlctrez/goapp-natsws"
 	"github.com/mlctrez/goapp-natsws/internal/goapp"
 	"github.com/mlctrez/goapp-natsws/internal/goapp/compo"
 	"github.com/mlctrez/goapp-natsws/internal/gocert"
-	"github.com/mlctrez/goapp-natsws/proxy"
 	"github.com/mlctrez/servicego"
 	"io/fs"
 	"net"
@@ -173,11 +173,11 @@ func setupStaticHandlers(engine *gin.Engine) (err error) {
 
 func setupApiEndpoints(engine *gin.Engine) error {
 
-	var backends = []string{
-		"wss://nats-0.localtest.me:4252",
+	proxy := &natsws.Proxy{
+		Manager: natsws.StaticManager("wss://nats-0.localtest.me:4252"),
 	}
 
-	engine.GET("/natsws/:clientId", gin.WrapH(proxy.New(backends...)))
+	engine.GET("/natsws/:clientId", gin.WrapH(proxy))
 
 	return nil
 }

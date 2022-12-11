@@ -3,7 +3,7 @@ package demo
 import (
 	"fmt"
 	"github.com/maxence-charriere/go-app/v9/pkg/app"
-	"github.com/mlctrez/goapp-natsws/natsws"
+	natsws "github.com/mlctrez/goapp-natsws"
 	"github.com/nats-io/nats.go"
 	"time"
 )
