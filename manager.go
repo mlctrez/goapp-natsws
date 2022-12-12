@@ -3,6 +3,8 @@ package natsws
 import (
 	"crypto/tls"
 	"log"
+	"nhooyr.io/websocket"
+	"strings"
 )
 
 type Manager interface {
@@ -46,7 +48,13 @@ func (s *staticManager) TLSConfig() *tls.Config {
 }
 
 func (s *staticManager) OnError(message string, err error) {
-	log.Printf("natsws.Manager message=%s err=%v", message, err)
+	switch websocket.CloseStatus(err) {
+	case websocket.StatusGoingAway, websocket.StatusNormalClosure:
+	default:
+		if !strings.Contains(err.Error(), "failed to read frame header: EOF") {
+			log.Printf("natsws.Manager message=%s err=%v", message, err)
+		}
+	}
 }
 
 func (s *staticManager) Randomize() bool {
