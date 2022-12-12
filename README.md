@@ -18,6 +18,11 @@ See [root.go](internal/goapp/compo/root.go) for component usage,
 and [service.go](internal/goapp/service/service.go#L176)
 for configuration of the proxy.
 
+To run the demo application, change the working directory to `goapp-natsws/internal` and issue a `make` command to
+build and run the demo application. Note that the connection information in
+[service.go](internal/goapp/service/service.go#L176) will need to be updated to point to a valid nats websocket
+endpoint.
+
 > Note: The demo app will fail if the listen address ends with 443. It will try to connect to a custom Certificate
 > Authority which you won't have.
 
