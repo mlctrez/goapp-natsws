@@ -4,11 +4,12 @@ import (
 	"fmt"
 	"github.com/google/uuid"
 	"github.com/maxence-charriere/go-app/v9/pkg/app"
+	"github.com/maxence-charriere/go-app/v9/pkg/errors"
 	"github.com/nats-io/nats.go"
-	"log"
 	"net"
 	"net/url"
 	"nhooyr.io/websocket"
+	"runtime"
 	"strings"
 	"time"
 )
@@ -17,19 +18,42 @@ const State = "natsws.Connection"
 const StateClientName = State + ".clientName"
 const Ping = State + ".ping"
 
+type ChangeReason string
+
+const Connect ChangeReason = "connect"
+const Reconnect ChangeReason = "reconnect"
+const Disconnect ChangeReason = "disconnect"
+
 type Connection struct {
 	appContext    app.Context
 	clientName    string
-	connected     bool
 	wsConn        *websocket.Conn
 	natsConn      *nats.Conn
 	subscriptions []*nats.Subscription
+	changeReason  ChangeReason
 }
 
+// Observe simplifies observing the State of the Connection.
+//
+//		The pointer to the Connection must not be nil.
+//	 See example for ways to initialize the Connection pointer.
 func Observe(ctx app.Context, value *Connection) app.Observer {
+	logNilConnection(value)
 	observer := ctx.ObserveState(State)
 	observer.Value(value)
 	return observer
+}
+
+func logNilConnection(value *Connection) {
+	if value == nil {
+		// print a warning and show where the call came from
+		_, file, line, ok := runtime.Caller(2)
+		if ok {
+			fileLine := fmt.Sprintf("%s:%d", file, line)
+			e := errors.New("natsws.Observe got nil value from").Tag("file:line", fileLine)
+			app.Logf("%v", e)
+		}
+	}
 }
 
 func (c *Connection) setState() {
@@ -40,7 +64,7 @@ func (c *Connection) run() {
 	c.ctx().GetState(StateClientName, &c.clientName)
 	if c.clientName == "" {
 		c.clientName = uuid.NewString()
-		c.ctx().SetState(StateClientName, c.clientName)
+		c.ctx().SetState(StateClientName, c.clientName, app.Persist)
 	}
 
 	defer c.unsubscribe()
@@ -57,53 +81,71 @@ func (c *Connection) run() {
 		case <-c.ctx().Done():
 			return
 		case <-initialConnect:
-			log.Println("initial connect")
 			c.connect()
 		case <-keepAlive.C:
-			if err := c.natsConn.Publish(Ping, []byte("ping")); err != nil {
-				log.Println("keepalive ping failed, reconnecting")
-				c.connect()
+			if c.natsConn.IsReconnecting() {
+				break
 			}
+			_ = c.natsConn.Publish(Ping, []byte("ping from "+c.clientName))
 		}
 	}
 
 }
+
 func (c *Connection) unsubscribe() {
-	fmt.Println("Connection: unsubscribe")
 	for _, sub := range c.subscriptions {
-		if err := sub.Unsubscribe(); err != nil {
-			fmt.Printf("sub.Unsubscribe() error : %#v", err)
-		}
+		_ = sub.Unsubscribe()
 	}
 }
-func (c *Connection) Subscribe(subject string, cb nats.MsgHandler) (err error) {
 
+func (c *Connection) Subscribe(subject string, cb nats.MsgHandler) (err error) {
 	var conn *nats.Conn
 	if conn, err = c.Nats(); err != nil {
 		return
 	}
+
 	var sub *nats.Subscription
 	if sub, err = conn.Subscribe(subject, cb); err != nil {
 		return
 	}
+
 	c.subscriptions = append(c.subscriptions, sub)
+	return
+}
+
+func (c *Connection) Publish(subject string, message []byte) (err error) {
+	var conn *nats.Conn
+	if conn, err = c.Nats(); err != nil {
+		return
+	}
+
+	err = conn.Publish(subject, message)
 	return
 }
 
 func (c *Connection) connect() {
 
-	opts := []nats.Option{nats.Name(c.ClientName()), nats.InProcessServer(c)}
+	var opts []nats.Option
 
-	var err error
-	if c.natsConn, err = nats.Connect(c.wsUrl(), opts...); err != nil {
-		c.natsConn = nil
-		c.connected = false
-		return
-	} else {
-		c.connected = true
-	}
+	opts = append(opts, nats.InProcessServer(c))
+	opts = append(opts, nats.RetryOnFailedConnect(true))
+	opts = append(opts, nats.Name(c.ClientName()))
 
-	c.setState()
+	opts = append(opts, nats.ConnectHandler(func(conn *nats.Conn) {
+		c.changeReason = Connect
+		c.setState()
+	}))
+	opts = append(opts, nats.ReconnectHandler(func(conn *nats.Conn) {
+		c.changeReason = Reconnect
+		c.setState()
+	}))
+	opts = append(opts, nats.DisconnectErrHandler(func(conn *nats.Conn, err error) {
+		c.changeReason = Disconnect
+		c.setState()
+	}))
+
+	c.natsConn, _ = nats.Connect(c.wsUrl(), opts...)
+
 	return
 }
 
@@ -126,22 +168,32 @@ func (c *Connection) wsUrl() string {
 	return u
 }
 
-func (c *Connection) Publish(subject string, message []byte) (err error) {
-	var conn *nats.Conn
-	if conn, err = c.Nats(); err != nil {
-		return err
-	}
-	return conn.Publish(subject, message)
-}
-
 func (c *Connection) Nats() (conn *nats.Conn, err error) {
-	if !c.connected {
+	if c.natsConn == nil || !c.natsConn.IsConnected() {
 		return nil, fmt.Errorf("not connected")
 	}
 	return c.natsConn, nil
 }
 
-func (c *Connection) windowUrl() *url.URL { return app.Window().URL() }
-func (c *Connection) ClientName() string  { return c.clientName }
-func (c *Connection) IsConnected() bool   { return c.connected }
-func (c *Connection) ctx() app.Context    { return c.appContext }
+func (c *Connection) windowUrl() *url.URL {
+	return app.Window().URL()
+}
+
+func (c *Connection) ctx() app.Context {
+	return c.appContext
+}
+
+func (c *Connection) ClientName() string {
+	return c.clientName
+}
+
+func (c *Connection) IsConnected() bool {
+	if c.natsConn == nil {
+		return false
+	}
+	return c.natsConn.IsConnected()
+}
+
+func (c *Connection) ChangeReason() ChangeReason {
+	return c.changeReason
+}

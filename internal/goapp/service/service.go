@@ -174,7 +174,7 @@ func setupStaticHandlers(engine *gin.Engine) (err error) {
 func setupApiEndpoints(engine *gin.Engine) error {
 
 	proxy := &natsws.Proxy{
-		Manager: natsws.StaticManager("wss://nats-0.localtest.me:4252"),
+		Manager: natsws.StaticManager(os.Getenv("DEV") != "", "wss://nats-0.localtest.me:4252"),
 	}
 
 	engine.GET("/natsws/:clientId", gin.WrapH(proxy))

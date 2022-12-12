@@ -3,6 +3,7 @@ module github.com/mlctrez/goapp-natsws/internal
 go 1.19
 
 replace github.com/mlctrez/goapp-natsws => ../../goapp-natsws
+replace github.com/maxence-charriere/go-app/v9 => ../../go-app
 
 require (
 	github.com/anargu/gin-brotli v0.0.0-20220116052358-12bf532d5267

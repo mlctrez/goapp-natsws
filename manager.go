@@ -18,24 +18,23 @@ type Manager interface {
 
 	// Randomize indicates Backends() should be shuffled before connection attempts.
 	Randomize() bool
+
+	// IsDebug will log all payloads on the server when true.
+	IsDebug() bool
 }
 
 var _ Manager = (*staticManager)(nil)
 
-func StaticManager(backends ...string) Manager {
-	return &staticManager{backends: backends}
+func StaticManager(debug bool, backends ...string) Manager {
+	return &staticManager{
+		backends: backends,
+		debug:    debug,
+	}
 }
 
 type staticManager struct {
 	backends []string
-}
-
-func (s *staticManager) Randomize() bool {
-	return true
-}
-
-func (s *staticManager) OnError(message string, err error) {
-	log.Printf("natsws.Manager message=%s err=%v", message, err)
+	debug    bool
 }
 
 func (s *staticManager) Backends() []string {
@@ -44,4 +43,16 @@ func (s *staticManager) Backends() []string {
 
 func (s *staticManager) TLSConfig() *tls.Config {
 	return nil
+}
+
+func (s *staticManager) OnError(message string, err error) {
+	log.Printf("natsws.Manager message=%s err=%v", message, err)
+}
+
+func (s *staticManager) Randomize() bool {
+	return true
+}
+
+func (s *staticManager) IsDebug() bool {
+	return s.debug
 }

@@ -14,14 +14,18 @@ import (
 var _ http.Handler = (*Proxy)(nil)
 
 type Proxy struct {
+	Context context.Context
 	Manager Manager
+
+	proxyContext context.Context
+	proxyCancel  context.CancelFunc
 }
 
-func (a *Proxy) pickNatsURL() string {
+func (p *Proxy) pickNatsURL() string {
 
-	hosts := a.Manager.Backends()
+	hosts := p.Manager.Backends()
 
-	if a.Manager.Randomize() {
+	if p.Manager.Randomize() {
 		rand.Shuffle(len(hosts), func(i, j int) {
 			hosts[i], hosts[j] = hosts[j], hosts[i]
 		})
@@ -37,9 +41,9 @@ func (a *Proxy) pickNatsURL() string {
 				return host
 			}
 		}
-		if strings.HasPrefix(host, "ws://") {
-			hostOnly := strings.TrimPrefix(host, "ws://")
-			if conn, dialErr := tls.Dial(network, hostOnly, a.Manager.TLSConfig()); dialErr == nil {
+		if strings.HasPrefix(host, "wss://") {
+			hostOnly := strings.TrimPrefix(host, "wss://")
+			if conn, dialErr := tls.Dial(network, hostOnly, p.Manager.TLSConfig()); dialErr == nil {
 				_ = conn.Close()
 				return host
 			}
@@ -48,32 +52,36 @@ func (a *Proxy) pickNatsURL() string {
 	return ""
 }
 
-func (a *Proxy) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
+func (p *Proxy) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 
 	var natsUrl string
-	if natsUrl = a.pickNatsURL(); natsUrl == "" {
-		a.Manager.OnError("pickNatsURL", fmt.Errorf("none available"))
+	if natsUrl = p.pickNatsURL(); natsUrl == "" {
+		p.Manager.OnError("pickNatsURL", fmt.Errorf("none available"))
 		writer.WriteHeader(http.StatusServiceUnavailable)
 		return
 	}
 
-	options := a.buildAcceptOptions(request)
+	options := p.buildAcceptOptions(request)
 
 	var err error
 	var client *websocket.Conn
 	var backend *websocket.Conn
 
-	ctx := context.TODO()
+	if p.Context == nil {
+		p.Context = context.TODO()
+	}
 
-	if backend, _, err = websocket.Dial(ctx, natsUrl, nil); err != nil {
-		a.Manager.OnError("Proxy websocket.Dial", err)
+	p.proxyContext, p.proxyCancel = context.WithCancel(p.Context)
+
+	if backend, _, err = websocket.Dial(p.proxyContext, natsUrl, nil); err != nil {
+		p.Manager.OnError("Proxy websocket.Dial", err)
 		writer.WriteHeader(http.StatusServiceUnavailable)
 		return
 	}
 	defer func() { _ = backend.Close(websocket.StatusNormalClosure, "") }()
 
 	if client, err = websocket.Accept(writer, request, options); err != nil {
-		a.Manager.OnError("Proxy websocket.Accept", err)
+		p.Manager.OnError("Proxy websocket.Accept", err)
 		// websocket.Accept takes care of writing the status code
 		return
 	}
@@ -82,8 +90,8 @@ func (a *Proxy) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 	errClient := make(chan error, 1)
 	errBackend := make(chan error, 1)
 
-	go copyWebSocketFrames(ctx, client, backend, errClient, errBackend)
-	go copyWebSocketFrames(ctx, backend, client, errBackend, errClient)
+	go p.copyWebSocketFrames("client->backend", client, backend, errClient, errBackend)
+	go p.copyWebSocketFrames("client<-backend", backend, client, errBackend, errClient)
 
 	var msg string
 	select {
@@ -97,17 +105,18 @@ func (a *Proxy) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 	case websocket.StatusGoingAway, websocket.StatusNormalClosure:
 	default:
 		if !strings.Contains(err.Error(), "failed to read frame header: EOF") {
-			a.Manager.OnError(msg, err)
+			p.Manager.OnError(msg, err)
 		}
 	}
 
 }
 
-func copyWebSocketFrames(ctx context.Context, from, to *websocket.Conn, fromChan chan<- error, toChan chan<- error) {
+func (p *Proxy) copyWebSocketFrames(direction string, from, to *websocket.Conn, fromChan chan<- error, toChan chan<- error) {
 
 	for {
-		messageType, bytes, err := from.Read(ctx)
+		messageType, bytes, err := from.Read(p.proxyContext)
 		if err != nil {
+			p.Manager.OnError(direction, err)
 			closeStatus := websocket.StatusNormalClosure
 			closeMessage := err.Error()
 			if len(closeMessage) > 123 {
@@ -123,7 +132,14 @@ func copyWebSocketFrames(ctx context.Context, from, to *websocket.Conn, fromChan
 			_ = to.Close(closeStatus, closeMessage)
 			break
 		}
-		err = to.Write(ctx, messageType, bytes)
+		if p.Manager.IsDebug() {
+			fmt.Printf("%s : %q\n", direction, string(bytes))
+			// demo simulating a server disconnect
+			if string(bytes) == "PUB demo.disconnect 0\r\n\r\n" {
+				p.proxyCancel()
+			}
+		}
+		err = to.Write(p.proxyContext, messageType, bytes)
 		if err != nil {
 			toChan <- err
 			break
@@ -132,7 +148,7 @@ func copyWebSocketFrames(ctx context.Context, from, to *websocket.Conn, fromChan
 
 }
 
-func (a *Proxy) buildAcceptOptions(request *http.Request) *websocket.AcceptOptions {
+func (p *Proxy) buildAcceptOptions(request *http.Request) *websocket.AcceptOptions {
 	var options *websocket.AcceptOptions
 	// https://github.com/gorilla/websocket/issues/731
 	// Compression in certain Safari browsers is broken, turn it off
