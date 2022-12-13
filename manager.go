@@ -9,19 +9,20 @@ import (
 
 type Manager interface {
 	// Backends should return a list of current nats websocket endpoints.
-	//   These can only be in the format wss://host:port or ws://host:port
+	//   If the format is ws[s]://host:port then a websocket proxy will be used.
+	//   If the format is http[s]://host:port then a httputil.ReverseProxy will be used.
 	Backends() []string
 
-	// TLSConfig passed to tls.Dial for testing wss:// backends.
+	// TLSConfig passed to tls.Dial for testing tls backends.
 	TLSConfig() *tls.Config
 
-	// OnError will be called when errors occur within the proxy.
+	// OnError will be called when errors occur within the websocket proxy only.
 	OnError(message string, err error)
 
 	// Randomize indicates Backends() should be shuffled before connection attempts.
 	Randomize() bool
 
-	// IsDebug will log all payloads on the server when true.
+	// IsDebug will log all payloads on the websocket proxy only when true.
 	IsDebug() bool
 }
 

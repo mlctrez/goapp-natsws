@@ -85,14 +85,14 @@ type ListenInfo struct {
 }
 
 func (i *ListenInfo) useDialer() string {
-	if os.Getenv(natsws.UseDialer) != "" {
-		scheme := "ws"
-		if i.tlsConfig != nil {
-			scheme = "wss"
-		}
-		return fmt.Sprintf("%s://%s:%d", scheme, i.host, i.portInt)
+	if os.Getenv(natsws.UseDialer) == "" {
+		return ""
 	}
-	return ""
+	scheme := "ws"
+	if i.tlsConfig != nil {
+		scheme = "wss"
+	}
+	return fmt.Sprintf("%s://%s:%d", scheme, i.host, i.portInt)
 }
 
 func (i *ListenInfo) wsScheme() string {
