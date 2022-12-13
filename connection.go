@@ -24,6 +24,8 @@ const Connect ChangeReason = "connect"
 const Reconnect ChangeReason = "reconnect"
 const Disconnect ChangeReason = "disconnect"
 
+const UseDialer = "GOAPP_NATSWS_DIALER"
+
 type Connection struct {
 	appContext    app.Context
 	clientName    string
@@ -127,7 +129,12 @@ func (c *Connection) connect() {
 
 	var opts []nats.Option
 
-	opts = append(opts, nats.InProcessServer(c))
+	if app.Getenv(UseDialer) != "" {
+		opts = append(opts, nats.SetCustomDialer(&customDialer{connection: c}))
+	} else {
+		opts = append(opts, nats.InProcessServer(c))
+	}
+
 	opts = append(opts, nats.RetryOnFailedConnect(true))
 	opts = append(opts, nats.Name(c.ClientName()))
 
@@ -144,9 +151,34 @@ func (c *Connection) connect() {
 		c.setState()
 	}))
 
-	c.natsConn, _ = nats.Connect(c.wsUrl(), opts...)
+	// remove the wss or ws scheme from the connection url to prevent
+	// websocket upgrade negotiation in the client
+	natsUrl := c.wsUrl()
+	natsUrl = strings.TrimPrefix(natsUrl, "ws://")
+	natsUrl = strings.TrimPrefix(natsUrl, "wss://")
+	c.natsConn, _ = nats.Connect(natsUrl, opts...)
 
 	return
+}
+
+type customDialer struct {
+	connection *Connection
+}
+
+func (d *customDialer) SkipTLSHandshake() bool {
+	return true
+}
+
+func (d *customDialer) Dial(_, _ string) (net.Conn, error) {
+	c := d.connection
+	u := fmt.Sprintf("%s/natsws/%s", c.wsUrl(), c.clientName)
+	conn, _, err := websocket.Dial(c.ctx(), u, nil)
+	if err != nil {
+		fmt.Println("customDialer websocket.Dial error", err)
+		return nil, err
+	}
+	netConn := websocket.NetConn(c.ctx(), conn, websocket.MessageBinary)
+	return netConn, nil
 }
 
 func (c *Connection) InProcessConn() (netConn net.Conn, err error) {
@@ -161,6 +193,10 @@ func (c *Connection) InProcessConn() (netConn net.Conn, err error) {
 }
 
 func (c *Connection) wsUrl() string {
+	natsWsConn := app.Getenv(UseDialer)
+	if natsWsConn != "" {
+		return natsWsConn
+	}
 	scheme := "ws" + strings.TrimPrefix(c.windowUrl().Scheme, "http")
 
 	u := fmt.Sprintf("%s://%s/natsws/%s", scheme, c.windowUrl().Host, c.ClientName())

@@ -4,6 +4,7 @@ package service
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -16,11 +17,13 @@ import (
 	"github.com/mlctrez/goapp-natsws/internal/goapp/compo"
 	"github.com/mlctrez/goapp-natsws/internal/gocert"
 	"github.com/mlctrez/servicego"
+	"github.com/nats-io/nats-server/v2/logger"
+	"github.com/nats-io/nats-server/v2/server"
 	"io/fs"
 	"net"
 	"net/http"
 	"os"
-	"strings"
+	"strconv"
 	"time"
 )
 
@@ -37,30 +40,102 @@ var IsDev = DevEnv != ""
 type Service struct {
 	servicego.Defaults
 	serverShutdown func(ctx context.Context) error
+	listenInfo     *ListenInfo
+	natsServer     *server.Server
+}
+
+func (s *Service) startNats() (err error) {
+
+	host := s.listenInfo.host
+	port := s.listenInfo.portInt
+
+	o := &server.Options{
+		Host: host, Port: port + 10, NoSigs: true,
+		Websocket: server.WebsocketOpts{Host: host, Port: port + 20},
+	}
+
+	if s.listenInfo.tlsConfig != nil {
+		o.Websocket.TLSConfig = s.listenInfo.tlsConfig
+	} else {
+		o.Websocket.NoTLS = true
+	}
+
+	var svr *server.Server
+	if svr, err = server.NewServer(o); err != nil {
+		return
+	}
+
+	svr.SetLogger(logger.NewTestLogger("nats", false), true, false)
+	go svr.Start()
+
+	if !svr.ReadyForConnections(4 * time.Second) {
+		return fmt.Errorf("nats failed to start, see log above")
+	}
+	svr.SetLogger(nil, false, false)
+
+	return nil
+}
+
+type ListenInfo struct {
+	listener  net.Listener
+	tlsConfig *tls.Config
+	host      string
+	port      string
+	portInt   int
+}
+
+func (i *ListenInfo) useDialer() string {
+	if os.Getenv(natsws.UseDialer) != "" {
+		scheme := "ws"
+		if i.tlsConfig != nil {
+			scheme = "wss"
+		}
+		return fmt.Sprintf("%s://%s:%d", scheme, i.host, i.portInt)
+	}
+	return ""
+}
+
+func (i *ListenInfo) wsScheme() string {
+	if i.tlsConfig != nil {
+		return "wss"
+	}
+	return "ws"
+}
+
+func (i *ListenInfo) scheme() string {
+	if i.tlsConfig != nil {
+		return "https"
+	}
+	return "http"
+}
+
+func (i *ListenInfo) backends() string {
+	if os.Getenv(natsws.UseDialer) == "" {
+		return fmt.Sprintf("%s://%s:%d", i.wsScheme(), i.host, i.portInt+20)
+	} else {
+		return fmt.Sprintf("%s://%s:%d", i.scheme(), i.host, i.portInt+20)
+	}
 }
 
 func (s *Service) Start(_ service.Service) (err error) {
 
-	var listener net.Listener
-	address := listenAddress()
-	if listener, err = net.Listen("tcp4", address); err != nil {
+	if err = s.listen(); err != nil {
 		return
 	}
-	scheme := "http"
-	if strings.HasSuffix(address, "443") {
-		scheme = "https"
-	}
 
-	fmt.Printf("listening on %s://%s\n", scheme, address)
+	if err = s.startNats(); err != nil {
+		_ = s.listenInfo.listener.Close()
+		return
+	}
 
 	engine := buildGinEngine()
 	if err = setupStaticHandlers(engine); err != nil {
 		return
 	}
-	if err = setupApiEndpoints(engine); err != nil {
+	if err = s.setupApiEndpoints(engine); err != nil {
 		return
 	}
-	if err = setupGoAppHandler(engine); err != nil {
+	if err = s.setupGoAppHandler(engine); err != nil {
 		return
 	}
 
@@ -69,14 +144,11 @@ func (s *Service) Start(_ service.Service) (err error) {
 
 	go func() {
 		var serveErr error
-		if strings.HasSuffix(address, "443") {
-			addressParts := strings.Split(address, ":")
-			server.TLSConfig, serveErr = gocert.DevTlsConfig(addressParts[0])
-			if serveErr == nil {
-				serveErr = server.ServeTLS(listener, "", "")
-			}
+		if s.listenInfo.tlsConfig != nil {
+			server.TLSConfig = s.listenInfo.tlsConfig
+			serveErr = server.ServeTLS(s.listenInfo.listener, "", "")
 		} else {
-			serveErr = server.Serve(listener)
+			serveErr = server.Serve(s.listenInfo.listener)
 		}
 		if serveErr != nil && serveErr != http.ErrServerClosed {
 			fmt.Println("server existing on error", serveErr)
@@ -88,6 +160,11 @@ func (s *Service) Start(_ service.Service) (err error) {
 }
 
 func (s *Service) Stop(_ service.Service) (err error) {
+
+	if s.natsServer != nil {
+		s.natsServer.Shutdown()
+	}
+
 	if s.serverShutdown != nil {
 
 		stopContext, cancel := context.WithTimeout(context.Background(), time.Second*2)
@@ -112,6 +189,39 @@ func listenAddress() string {
 		return "localhost:" + port
 	}
 
+}
+
+func (s *Service) listen() (err error) {
+
+	address := listenAddress()
+	var listener net.Listener
+	if listener, err = net.Listen("tcp4", address); err != nil {
+		return
+	}
+
+	info := &ListenInfo{listener: listener}
+	if info.host, info.port, err = net.SplitHostPort(address); err != nil {
+		_ = listener.Close()
+		return
+	}
+
+	scheme := "http"
+	if os.Getenv("GOAPP_USE_TLS") != "" {
+		scheme = "https"
+		if info.tlsConfig, err = gocert.DevTlsConfig(info.host); err != nil {
+			_ = listener.Close()
+			return
+		}
+	}
+	fmt.Printf("listening on %s://%s\n", scheme, address)
+
+	if info.portInt, err = parseInt(info.port); err != nil {
+		_ = listener.Close()
+		return
+	}
+	s.listenInfo = info
+
+	return nil
 }
 
 func buildGinEngine() (engine *gin.Engine) {
@@ -171,10 +281,10 @@ func setupStaticHandlers(engine *gin.Engine) (err error) {
 	return
 }
 
-func setupApiEndpoints(engine *gin.Engine) error {
+func (s *Service) setupApiEndpoints(engine *gin.Engine) error {
 
 	proxy := &natsws.Proxy{
-		Manager: natsws.StaticManager(os.Getenv("DEV") != "", "wss://nats-0.localtest.me:4252"),
+		Manager: natsws.StaticManager(os.Getenv("DEV") != "", s.listenInfo.backends()),
 	}
 
 	engine.GET("/natsws/:clientId", gin.WrapH(proxy))
@@ -182,7 +292,7 @@ func setupApiEndpoints(engine *gin.Engine) error {
 	return nil
 }
 
-func setupGoAppHandler(engine *gin.Engine) (err error) {
+func (s *Service) setupGoAppHandler(engine *gin.Engine) (err error) {
 
 	var handler *app.Handler
 
@@ -194,6 +304,7 @@ func setupGoAppHandler(engine *gin.Engine) (err error) {
 
 	handler.WasmContentLengthHeader = "Wasm-Content-Length"
 	handler.Env["DEV"] = os.Getenv("DEV")
+	handler.Env[natsws.UseDialer] = s.listenInfo.useDialer()
 
 	if IsDev {
 		handler.AutoUpdateInterval = time.Second * 3
@@ -221,4 +332,12 @@ func goAppHandlerFromJson() (handler *app.Handler, err error) {
 	}
 
 	return
+}
+
+func parseInt(in string) (int, error) {
+	i, err := strconv.ParseInt(in, 10, 16)
+	if err != nil {
+		return 0, err
+	}
+	return int(i), nil
 }

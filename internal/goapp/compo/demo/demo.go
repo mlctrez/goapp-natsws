@@ -48,11 +48,13 @@ func (d *Demo) Render() app.UI {
 	return app.Div().Body(
 		app.Text("changeReason "+d.conn.ChangeReason()),
 		app.Br(),
-		app.Button().Text("disconnect").OnClick(func(ctx app.Context, e app.Event) {
-			if conn, err := d.conn.Nats(); err == nil {
-				_ = conn.Publish("demo.disconnect", []byte{})
-			}
-		}),
+		app.If(app.Getenv(natsws.UseDialer) == "",
+			app.Button().Text("disconnect").OnClick(func(ctx app.Context, e app.Event) {
+				if conn, err := d.conn.Nats(); err == nil {
+					_ = conn.Publish("demo.disconnect", []byte{})
+				}
+			}),
+		),
 		app.Br(),
 		app.Button().Text("publish").OnClick(func(ctx app.Context, e app.Event) {
 			err := d.conn.Publish(Subject, []byte(time.Now().String()))

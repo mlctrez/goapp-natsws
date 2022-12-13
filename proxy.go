@@ -7,6 +7,8 @@ import (
 	"math/rand"
 	"net"
 	"net/http"
+	"net/http/httputil"
+	"net/url"
 	"nhooyr.io/websocket"
 	"strings"
 )
@@ -34,16 +36,19 @@ func (p *Proxy) pickNatsURL() string {
 	network := "tcp4"
 
 	for _, host := range hosts {
-		if strings.HasPrefix(host, "ws://") {
-			hostOnly := strings.TrimPrefix(host, "ws://")
-			if conn, dialErr := net.Dial(network, hostOnly); dialErr == nil {
+		u, err := url.Parse(host)
+		if err != nil {
+			fmt.Printf("backend parse %q, skipping\n", host)
+			continue
+		}
+		switch u.Scheme {
+		case "wss", "https":
+			if conn, dialErr := tls.Dial(network, u.Host, p.Manager.TLSConfig()); dialErr == nil {
 				_ = conn.Close()
 				return host
 			}
-		}
-		if strings.HasPrefix(host, "wss://") {
-			hostOnly := strings.TrimPrefix(host, "wss://")
-			if conn, dialErr := tls.Dial(network, hostOnly, p.Manager.TLSConfig()); dialErr == nil {
+		case "ws", "http":
+			if conn, dialErr := net.Dial(network, u.Host); dialErr == nil {
 				_ = conn.Close()
 				return host
 			}
@@ -58,6 +63,13 @@ func (p *Proxy) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 	if natsUrl = p.pickNatsURL(); natsUrl == "" {
 		p.Manager.OnError("pickNatsURL", fmt.Errorf("none available"))
 		writer.WriteHeader(http.StatusServiceUnavailable)
+		return
+	}
+
+	if strings.HasPrefix(natsUrl, "http") {
+		// url has already been parsed in pickNatsURL so parse error is ignored here
+		u, _ := url.Parse(natsUrl)
+		httputil.NewSingleHostReverseProxy(u).ServeHTTP(writer, request)
 		return
 	}
 
