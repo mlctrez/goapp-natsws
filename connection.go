@@ -52,7 +52,7 @@ func logNilConnection(value *Connection) {
 		_, file, line, ok := runtime.Caller(2)
 		if ok {
 			fileLine := fmt.Sprintf("%s:%d", file, line)
-			e := errors.New("natsws.Observe got nil value from").Tag("file:line", fileLine)
+			e := errors.Newf("natsws.Observe got nil value from file:line %x", fileLine)
 			app.Logf("%v", e)
 		}
 	}
